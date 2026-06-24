@@ -1,7 +1,7 @@
 # ════════════════════════════════════════════════════════════════
 #   ARIA - Adaptive Response Intelligence Assistant
 #   Author  : Naeem (Oasis Infobyte Internship — Task 1)
-#   Version : 2.0
+#   Version : 3.0
 #   Stack   : Python | SpeechRecognition | pyttsx3 | OpenWeather
 # ════════════════════════════════════════════════════════════════
 
@@ -16,19 +16,20 @@ import smtplib
 import random
 import sys
 import os
+import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 # ── ARIA Configuration ────────────────────────────────────────────
-load_dotenv()  
+load_dotenv()
 
 ASSISTANT_NAME  = "Aria"
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 DEFAULT_CITY    = "Peshawar"
-EMAIL_ADDRESS   = os.getenv("EMAIL_ADDRESS")    # this method is used to keep personal information confidential
-EMAIL_PASSWORD  = os.getenv("EMAIL_PASSWORD") 
+EMAIL_ADDRESS   = os.getenv("EMAIL_ADDRESS")
+EMAIL_PASSWORD  = os.getenv("EMAIL_PASSWORD")
 
-# ── Boot-up Greetings (randomized — unique touch) ─────────────────
+# ── Boot-up Greetings (randomized) ───────────────────────────────
 BOOT_MESSAGES = [
     f"Hello! {ASSISTANT_NAME} is online and ready to assist you.",
     f"Good to see you! {ASSISTANT_NAME} at your service.",
@@ -43,6 +44,7 @@ def get_time_greeting() -> str:
     elif hour < 17: return "Good afternoon"
     else:           return "Good evening"
 
+
 # ════════════════════════════════════════════════════════════════
 #  CORE ENGINE  —  Speech I/O
 # ════════════════════════════════════════════════════════════════
@@ -55,9 +57,14 @@ class VoiceEngine:
         self.tts.setProperty('rate', 165)
         self.tts.setProperty('volume', 0.95)
         voices = self.tts.getProperty('voices')
-        # Pick a clear voice if available
+
+        # Print all voices so you can pick your preferred one
+        for i, voice in enumerate(voices):
+            print(f"Voice {i}: {voice.name} | ID: {voice.id}")
+
+        # Change index to switch voice (0, 1, 2 etc.)
         if voices:
-            self.tts.setProperty('voice', voices[0].id)
+            self.tts.setProperty('voice', voices[4].id)
 
     def respond(self, message: str):
         """Speak and print a response."""
@@ -68,28 +75,31 @@ class VoiceEngine:
     def capture_voice(self, prompt: str = "") -> str | None:
         """Listen to microphone and return transcribed text."""
         mic = sr.Recognizer()
-        mic.pause_threshold    = 0.8
+        mic.energy_threshold         = 300
         mic.dynamic_energy_threshold = True
+        mic.pause_threshold          = 0.8
 
         if prompt:
             self.respond(prompt)
 
         with sr.Microphone() as source:
             print("  🎙  Listening...", end=" ", flush=True)
-            mic.adjust_for_ambient_noise(source, duration=0.4)
+            mic.adjust_for_ambient_noise(source, duration=0.5)
             try:
-                raw_audio = mic.listen(source, timeout=6, phrase_time_limit=10)
+                raw_audio  = mic.listen(source, timeout=8, phrase_time_limit=8)
                 transcript = mic.recognize_google(raw_audio, language="en-US")
                 print(f"Heard: '{transcript}'")
                 return transcript.lower().strip()
 
             except sr.WaitTimeoutError:
-                self.respond("I didn't catch anything. Please speak again.")
+                print("Timeout — no speech detected.")
+                return None                          # silent, no speaking
             except sr.UnknownValueError:
-                self.respond("Couldn't make that out. Mind repeating?")
+                print("Could not understand audio.")
+                return None                          # silent, no speaking
             except sr.RequestError:
                 self.respond("Speech service is unreachable right now.")
-            return None
+                return None
 
 
 # ════════════════════════════════════════════════════════════════
@@ -120,23 +130,49 @@ class SkillSet:
 
     # ── Wikipedia Knowledge ───────────────────────────────────────
     def wiki_lookup(self, raw_query: str):
-        topic = raw_query.replace("wikipedia", "").replace("search", "").strip()
+        # Clean all trigger words from query
+        remove_words = ["wikipedia", "search", "tell me about",
+                        "who is", "what is", "look up", "find"]
+        topic = raw_query
+        for word in remove_words:
+            topic = topic.replace(word, "").strip()
+
         if not topic:
             self.engine.respond("What topic should I search on Wikipedia?")
             return
-        self.engine.respond(f"Looking up {topic} on Wikipedia...")
+
+        self.engine.respond(f"Looking up {topic}.")
+
         try:
-            summary = wikipedia.summary(topic, sentences=3, auto_suggest=True)
-            self.engine.respond(summary)
-        except wikipedia.exceptions.DisambiguationError as e:
+            wikipedia.set_lang("en")
+            results = wikipedia.search(topic, results=3)
+
+            if not results:
+                self.engine.respond(f"No results found for {topic}.")
+                return
+
+            # Try top results with fallback
+            for result in results[:2]:
+                try:
+                    summary = wikipedia.summary(
+                        result,
+                        sentences=2,
+                        auto_suggest=False,
+                        redirect=True
+                    )
+                    self.engine.respond(summary)
+                    return
+                except wikipedia.exceptions.DisambiguationError:
+                    continue
+                except wikipedia.exceptions.PageError:
+                    continue
+
             self.engine.respond(
-                f"Multiple results found for {topic}. "
-                f"Try being more specific. For example: {e.options[0]}."
-            )
-        except wikipedia.exceptions.PageError:
-            self.engine.respond(f"No Wikipedia page found for {topic}.")
+                f"Couldn't find a clear result for {topic}. Try being more specific.")
+
         except Exception:
-            self.engine.respond("Something went wrong with the Wikipedia search.")
+            self.engine.respond(
+                f"Wikipedia search failed for {topic}. Please try again.")
 
     # ── Weather ──────────────────────────────────────────────────
     def fetch_weather(self, city: str = DEFAULT_CITY):
@@ -145,17 +181,17 @@ class SkillSet:
             f"?q={city}&appid={WEATHER_API_KEY}&units=metric"
         )
         try:
-            data     = requests.get(endpoint, timeout=5).json()
+            data      = requests.get(endpoint, timeout=5).json()
             if data.get("cod") != 200:
                 self.engine.respond(f"I couldn't find weather data for {city}.")
                 return
-            temp     = data["main"]["temp"]
-            feels    = data["main"]["feels_like"]
-            humidity = data["main"]["humidity"]
-            condition= data["weather"][0]["description"]
+            temp      = data["main"]["temp"]
+            feels     = data["main"]["feels_like"]
+            humidity  = data["main"]["humidity"]
+            condition = data["weather"][0]["description"]
             self.engine.respond(
-                f"In {city}, it's {condition} with {temp}°C. "
-                f"Feels like {feels}°C and humidity is {humidity} percent."
+                f"In {city}, it's {condition} with {temp} degrees Celsius. "
+                f"Feels like {feels} degrees and humidity is {humidity} percent."
             )
         except requests.exceptions.Timeout:
             self.engine.respond("Weather request timed out. Check your connection.")
@@ -165,21 +201,26 @@ class SkillSet:
     # ── Browser Control ──────────────────────────────────────────
     def launch_site(self, query: str):
         site_map = {
-            "youtube"   : "https://www.youtube.com",
-            "google"    : "https://www.google.com",
-            "github"    : "https://www.github.com",
-            "gmail"     : "https://mail.google.com",
-            "linkedin"  : "https://www.linkedin.com",
+            "youtube"      : "https://www.youtube.com",
+            "google"       : "https://www.google.com",
+            "github"       : "https://www.github.com",
+            "gmail"        : "https://mail.google.com",
+            "linkedin"     : "https://www.linkedin.com",
             "stackoverflow": "https://stackoverflow.com",
-            "chatgpt"   : "https://chat.openai.com",
+            "chatgpt"      : "https://chat.openai.com",
         }
         for name, link in site_map.items():
             if name in query:
                 self.engine.respond(f"Opening {name} in your browser.")
                 webbrowser.open(link)
                 return
+
         # Fallback: Google search
-        search_query = query.replace("open", "").replace("search for", "").strip()
+        search_query = (query.replace("open", "")
+                            .replace("launch", "")
+                            .replace("go to", "")
+                            .replace("search for", "")
+                            .strip())
         if search_query:
             self.engine.respond(f"Searching Google for {search_query}.")
             webbrowser.open(f"https://www.google.com/search?q={search_query}")
@@ -189,10 +230,10 @@ class SkillSet:
     # ── Email Composer ───────────────────────────────────────────
     def compose_and_send_email(self, to: str, subject: str, body: str):
         try:
-            msg                    = MIMEMultipart()
-            msg["From"]            = EMAIL_ADDRESS
-            msg["To"]              = to
-            msg["Subject"]         = subject
+            msg            = MIMEMultipart()
+            msg["From"]    = EMAIL_ADDRESS
+            msg["To"]      = to
+            msg["Subject"] = subject
             msg.attach(MIMEText(body, "plain"))
 
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as session:
@@ -201,20 +242,23 @@ class SkillSet:
 
             self.engine.respond(f"Email successfully sent to {to}.")
         except smtplib.SMTPAuthenticationError:
-            self.engine.respond("Email authentication failed. Check your credentials.")
+            self.engine.respond(
+                "Email authentication failed. Check your credentials in the env file.")
         except Exception as e:
             self.engine.respond(f"Could not send email. Error: {str(e)}")
 
-    # ── System Controls ──────────────────────────────────────────
+    # ── Jokes ────────────────────────────────────────────────────
     def tell_joke(self):
         jokes = [
             "Why do programmers prefer dark mode? Because light attracts bugs!",
             "I told my computer I needed a break. Now it won't stop sending me Kit-Kat ads.",
             "Why did the developer go broke? Because he used up all his cache.",
             "A SQL query walks into a bar, walks up to two tables and asks: Can I join you?",
+            "Why do Java developers wear glasses? Because they don't C sharp!",
         ]
         self.engine.respond(random.choice(jokes))
 
+    # ── Self Introduction ────────────────────────────────────────
     def self_intro(self):
         self.engine.respond(
             f"I'm {ASSISTANT_NAME}, an AI voice assistant built with Python "
@@ -231,7 +275,7 @@ class SkillSet:
 class CommandRouter:
     """
     Routes voice input to the correct skill.
-    Uses keyword-based intent detection with priority ordering.
+    Uses keyword-based intent detection with strict priority ordering.
     """
 
     def __init__(self, engine: VoiceEngine, skills: SkillSet):
@@ -239,68 +283,76 @@ class CommandRouter:
         self.skills = skills
 
     def route(self, query: str):
-        if not query:
+        if not query or len(query.strip()) < 2:
             return
 
+        print(f"\n  Routing: '{query}'")
+
         # ── Greetings ────────────────────────────────────────────
-        if any(w in query for w in ["hello", "hi", "hey", "good morning",
-                                     "good afternoon", "good evening"]):
+        if any(w in query for w in ["hello", "hi", "hey"]):
             greeting = get_time_greeting()
-            self.engine.respond(f"{greeting}! How can I assist you today?")
+            self.engine.respond(f"{greeting}! How can I assist you?")
 
         # ── Identity ─────────────────────────────────────────────
         elif any(w in query for w in ["who are you", "your name",
-                                       "what are you", "introduce yourself"]):
+                                       "what are you", "introduce"]):
             self.skills.self_intro()
 
-        # ── Time & Date ──────────────────────────────────────────
-        elif "time" in query:
+        # ── Time (before date to avoid conflict) ─────────────────
+        elif "time" in query and "date" not in query:
             self.skills.current_time()
 
-        elif "date" in query or "today" in query:
+        # ── Date ─────────────────────────────────────────────────
+        elif any(w in query for w in ["date", "today", "month", "year"]):
             self.skills.current_date()
 
+        # ── Day ──────────────────────────────────────────────────
         elif "day" in query:
             self.skills.day_of_week()
 
-        # ── Wikipedia ────────────────────────────────────────────
-        elif any(w in query for w in ["wikipedia", "who is", "what is",
-                                       "tell me about", "search"]):
-            self.skills.wiki_lookup(query)
-
-        # ── Weather ──────────────────────────────────────────────
-        elif "weather" in query or "temperature" in query or "forecast" in query:
+        # ── Weather (before wikipedia to avoid conflict) ──────────
+        elif any(w in query for w in ["weather", "temperature",
+                                       "forecast", "hot", "cold", "humid"]):
             self.skills.fetch_weather(DEFAULT_CITY)
 
+        # ── Wikipedia ────────────────────────────────────────────
+        elif any(w in query for w in ["wikipedia", "who is", "what is",
+                                       "tell me about", "search", "look up"]):
+            self.skills.wiki_lookup(query)
+
         # ── Email ────────────────────────────────────────────────
-        elif "email" in query or "send mail" in query:
-            recipient = self.engine.capture_voice("Who is the recipient's email address?")
-            subject   = self.engine.capture_voice("What is the subject of the email?")
-            body      = self.engine.capture_voice("What message should I include?")
+        elif any(w in query for w in ["email", "send mail", "send message"]):
+            recipient = self.engine.capture_voice(
+                "What is the recipient's email address?")
+            subject   = self.engine.capture_voice(
+                "What is the subject?")
+            body      = self.engine.capture_voice(
+                "What is the message?")
             if all([recipient, subject, body]):
                 self.skills.compose_and_send_email(recipient, subject, body)
             else:
                 self.engine.respond("Email cancelled due to missing information.")
 
         # ── Browser ──────────────────────────────────────────────
-        elif "open" in query or "launch" in query or "go to" in query:
+        elif any(w in query for w in ["open", "launch", "go to", "browse"]):
             self.skills.launch_site(query)
 
         # ── Joke ─────────────────────────────────────────────────
-        elif "joke" in query or "funny" in query or "make me laugh" in query:
+        elif any(w in query for w in ["joke", "funny", "laugh", "humor"]):
             self.skills.tell_joke()
 
         # ── Exit ─────────────────────────────────────────────────
         elif any(w in query for w in ["exit", "quit", "bye",
                                        "goodbye", "shut down", "stop"]):
-            self.engine.respond(f"Goodbye! {ASSISTANT_NAME} signing off. Have a great day!")
+            self.engine.respond(
+                f"Goodbye! {ASSISTANT_NAME} signing off. Have a great day!")
             sys.exit(0)
 
         # ── Fallback ─────────────────────────────────────────────
         else:
             self.engine.respond(
-                "I'm not sure how to help with that yet. "
-                "Try asking about the weather, time, or Wikipedia."
+                "I didn't catch that clearly. "
+                "Try asking about weather, time, or Wikipedia."
             )
 
 
@@ -316,11 +368,20 @@ def launch_aria():
     # Boot greeting
     engine.respond(random.choice(BOOT_MESSAGES))
 
-    # Main loop
+    # Main loop — never crashes, always keeps listening
     while True:
-        user_input = engine.capture_voice()
-        if user_input:
-            router.route(user_input)
+        try:
+            user_input = engine.capture_voice()
+            if user_input:
+                router.route(user_input)
+            time.sleep(0.3)       # small pause prevents overlapping audio
+
+        except KeyboardInterrupt:
+            engine.respond("Shutting down. Goodbye!")
+            sys.exit(0)
+        except Exception as e:
+            print(f"  Loop error: {e}")
+            continue              # recover from any unexpected error
 
 if __name__ == "__main__":
     launch_aria()
